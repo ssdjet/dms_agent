@@ -135,6 +135,44 @@ def read_workbook(
     )
 
 
+def workbook_sheet_names(path: str | Path) -> tuple[str, ...]:
+    """Return worksheet names without reading any cell contents."""
+    file_path = Path(path)
+    suffix = file_path.suffix.lower()
+    if suffix == ".xlsx":
+        try:
+            workbook = load_workbook(file_path, read_only=True, data_only=True)
+        except (OSError, InvalidFileException, BadZipFile, ValueError) as exc:
+            raise WorkbookReadError(
+                f"Unable to open .xlsx workbook: {file_path}"
+            ) from exc
+        try:
+            return tuple(workbook.sheetnames)
+        finally:
+            workbook.close()
+    if suffix == ".xls":
+        try:
+            import xlrd
+        except ImportError as exc:
+            raise WorkbookReadError(
+                "Reading .xls workbooks requires the xlrd dependency"
+            ) from exc
+        try:
+            workbook = xlrd.open_workbook(file_path, on_demand=True)
+        except (OSError, xlrd.XLRDError, ValueError) as exc:
+            raise WorkbookReadError(
+                f"Unable to open .xls workbook: {file_path}"
+            ) from exc
+        try:
+            return tuple(workbook.sheet_names())
+        finally:
+            workbook.release_resources()
+    raise WorkbookReadError(
+        f"Unsupported workbook format {suffix or '(no extension)'}; "
+        "expected .xlsx or .xls"
+    )
+
+
 def _read_xlsx(
     path: Path,
     config: WorkbookReadConfig,

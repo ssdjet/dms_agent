@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+import xlwt
 from openpyxl import Workbook
 
 from dms_pipeline.audit import (
@@ -45,6 +46,24 @@ def _write_workbook(path: Path, sheet_names: tuple[str, ...] = ("Claims",)) -> N
     workbook.save(path)
 
 
+def _write_legacy_workbook(
+    path: Path,
+    sheet_names: tuple[str, ...] = ("Claims",),
+) -> None:
+    workbook = xlwt.Workbook()
+    sheet = workbook.add_sheet(sheet_names[0])
+    sheet.write(0, 0, "Code")
+    sheet.write(0, 1, "Amount")
+    sheet.write(1, 0, "SVC-01")
+    sheet.write(1, 1, 25.5)
+    sheet.write(2, 0, "")
+    sheet.write(3, 0, "SVC-02")
+    sheet.write(3, 1, 40)
+    for sheet_name in sheet_names[1:]:
+        workbook.add_sheet(sheet_name)
+    workbook.save(str(path))
+
+
 def test_read_workbook_calculates_source_hash_and_preserves_rows(
     tmp_path: Path,
 ) -> None:
@@ -65,6 +84,32 @@ def test_read_workbook_calculates_source_hash_and_preserves_rows(
     }
 
 
+def test_read_legacy_xls_skips_empty_rows_and_preserves_source_row_numbers(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "synthetic.xls"
+    _write_legacy_workbook(source)
+
+    result = read_workbook(source, WorkbookReadConfig(required_columns=("Code",)))
+
+    assert result.sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert result.sheet_name == "Claims"
+    assert result.headers == ("Code", "Amount")
+    assert [row.row_number for row in result.rows] == [2, 4]
+    assert result.rows[0].values == {"Code": "SVC-01", "Amount": 25.5}
+    assert result.rows[1].values == {"Code": "SVC-02", "Amount": 40.0}
+
+
+def test_read_legacy_xls_requires_explicit_sheet_for_ambiguous_workbook(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "multiple.xls"
+    _write_legacy_workbook(source, ("Claims", "Other"))
+
+    with pytest.raises(WorkbookValidationError, match="sheet_name"):
+        read_workbook(source)
+
+
 def test_read_workbook_requires_explicit_sheet_for_ambiguous_workbook(
     tmp_path: Path,
 ) -> None:
@@ -81,6 +126,19 @@ def test_read_workbook_rejects_missing_required_columns(tmp_path: Path) -> None:
 
     with pytest.raises(WorkbookValidationError, match="missing required columns"):
         read_workbook(source, WorkbookReadConfig(required_columns=("Unknown",)))
+
+
+def test_read_workbook_rejects_duplicate_headers_case_insensitively(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "duplicate_headers.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Code", "code"])
+    workbook.save(source)
+
+    with pytest.raises(WorkbookValidationError, match="duplicate"):
+        read_workbook(source)
 
 
 def test_read_workbook_rejects_unsupported_format(tmp_path: Path) -> None:
@@ -211,6 +269,40 @@ def test_audit_aggregate_status_for_failed_or_unevaluated_rules() -> None:
 
     assert failed_event.status is AuditStatus.FAIL
     assert unevaluated_event.status is AuditStatus.NOT_EVALUATED
+
+
+def test_synthetic_workbook_pipeline_maps_validates_and_audits_without_values(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "synthetic.xlsx"
+    _write_workbook(source)
+    workbook = read_workbook(source)
+    field_mapping = FieldMapping(
+        {"Code": "service_code", "Diagnosis": "diagnosis", "Amount": "amount"},
+        required_targets=("service_code", "diagnosis", "amount"),
+    )
+    mapped = map_rows(workbook.rows, field_mapping)[0]
+    engine = build_rules(
+        RulesConfig(
+            service_code_field="service_code",
+            service_codes=("SVC-01",),
+            diagnosis_field="diagnosis",
+            diagnosis_codes=("DX-01",),
+            amount_field="amount",
+            maximum_amount=30,
+        )
+    )
+    event = create_audit_event(
+        workbook.sha256,
+        workbook.rows[0].row_number,
+        engine.evaluate(mapped),
+    )
+    audit_json = serialize_audit_event(event)
+
+    assert event.status is AuditStatus.PASS
+    assert "SVC-01" not in audit_json
+    assert "DX-01" not in audit_json
+    assert "25.5" not in audit_json
 
 
 def test_sample_yaml_loads_without_inventing_claim_schema() -> None:
