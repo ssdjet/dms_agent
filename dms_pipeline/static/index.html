@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>DMS — проверка реестра</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="DMS — главная">
+        <span class="brand-mark">D</span>
+        <span>DMS <span class="brand-muted">/ контроль реестра</span></span>
+      </a>
+      <span class="local-badge"><span></span> Локальная обработка</span>
+    </header>
+
+    <main class="page-shell">
+      <section class="intro">
+        <div>
+          <p class="eyebrow">ПРОВЕРКА ДАННЫХ</p>
+          <h1>Проверка реестра услуг</h1>
+          <p class="intro-copy">
+            Загрузите Excel, выберите столбцы и просмотрите сработки правил.
+            Файл обрабатывается локально и не сохраняется.
+          </p>
+        </div>
+        <div class="step-indicator" aria-label="Этапы работы">
+          <span class="step active"><span>1</span> Настройка</span>
+          <span class="step-divider"></span>
+          <span class="step"><span>2</span> Результаты</span>
+        </div>
+      </section>
+
+      <div id="global-error" class="notice error-notice" role="alert" hidden></div>
+
+      <section class="workspace">
+        <aside class="panel setup-panel" aria-labelledby="setup-title">
+          <div class="panel-heading">
+            <div class="section-number">01</div>
+            <div>
+              <h2 id="setup-title">Источник и поля</h2>
+              <p>Укажите файл и колонки для проверки</p>
+            </div>
+          </div>
+
+          <form id="analysis-form">
+            <label class="field-label" for="workbook-file">Файл Excel</label>
+            <label id="drop-zone" class="drop-zone" for="workbook-file">
+              <span class="upload-icon" aria-hidden="true">↑</span>
+              <span id="file-name" class="drop-title">Выберите файл или перетащите сюда</span>
+              <span class="drop-hint">Форматы XLS и XLSX · до 20 МБ</span>
+              <input id="workbook-file" name="file" type="file" accept=".xls,.xlsx" required>
+            </label>
+
+            <div class="inline-fields">
+              <div>
+                <label class="field-label" for="sheet-name">Лист</label>
+                <select id="sheet-name" name="sheet_name" disabled>
+                  <option value="">Определится автоматически</option>
+                </select>
+              </div>
+              <div class="header-row-field">
+                <label class="field-label" for="header-row">Строка заголовков</label>
+                <input id="header-row" name="header_row" type="number" min="1" value="1">
+              </div>
+            </div>
+            <p id="file-meta" class="field-hint" aria-live="polite">
+              Сначала выберите файл, затем нажмите «Считать столбцы».
+            </p>
+            <button id="inspect-button" class="button button-secondary" type="button" disabled>
+              Считать столбцы
+            </button>
+
+            <div id="column-settings" class="column-settings" hidden>
+              <div class="divider"></div>
+              <h3>Сопоставление полей</h3>
+              <p class="field-hint">Выберите столбцы, которые действительно есть в файле.</p>
+
+              <label class="field-label" for="service-code-column">Код услуги</label>
+              <select id="service-code-column" name="service_code_column"></select>
+
+              <label class="field-label" for="diagnosis-column">Диагноз</label>
+              <select id="diagnosis-column" name="diagnosis_column"></select>
+
+              <label class="field-label" for="amount-column">Сумма</label>
+              <select id="amount-column" name="amount_column"></select>
+
+              <div class="divider"></div>
+              <h3>Дополнительные критерии</h3>
+              <p class="field-hint">
+                Необязательные проверки. Укажите только утверждённый справочник или лимит.
+              </p>
+
+              <label class="field-label" for="service-codes">
+                Допустимые коды услуг
+              </label>
+              <textarea id="service-codes" name="service_codes" rows="3"
+                placeholder="По одному коду на строку"></textarea>
+
+              <label class="field-label" for="diagnosis-codes">
+                Допустимые коды диагнозов
+              </label>
+              <textarea id="diagnosis-codes" name="diagnosis_codes" rows="3"
+                placeholder="По одному коду на строку"></textarea>
+
+              <label class="field-label" for="maximum-amount">Максимальная сумма</label>
+              <input id="maximum-amount" name="maximum_amount" type="text"
+                inputmode="decimal" placeholder="Например, 100000">
+
+              <button id="analyze-button" class="button button-primary" type="submit">
+                <span>Запустить проверку</span>
+                <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          </form>
+
+          <div class="privacy-note">
+            <span class="privacy-icon" aria-hidden="true">⌑</span>
+            <p>
+              Данные пациентов не выводятся в результатах. Файл обрабатывается
+              на этом компьютере и удаляется после запроса.
+            </p>
+          </div>
+        </aside>
+
+        <section class="panel results-panel" aria-labelledby="results-title">
+          <div class="panel-heading results-heading">
+            <div class="section-number">02</div>
+            <div>
+              <h2 id="results-title">Результаты проверки</h2>
+              <p id="results-subtitle">Настройте поля слева и запустите проверку</p>
+            </div>
+            <span id="results-status" class="status-chip status-idle">Ожидание</span>
+          </div>
+
+          <div id="empty-results" class="empty-state">
+            <div class="empty-illustration" aria-hidden="true">
+              <div class="empty-sheet">
+                <span></span><span></span><span></span><span></span>
+              </div>
+              <div class="empty-check">✓</div>
+            </div>
+            <h3>Здесь появятся сработки</h3>
+            <p>
+              После проверки покажем сводку по правилам и номера строк
+              с замечаниями — без копирования значений из реестра.
+            </p>
+          </div>
+
+          <div id="results-content" hidden>
+            <div class="summary-grid">
+              <article class="summary-card summary-total">
+                <span>Проверено строк</span>
+                <strong id="count-total">0</strong>
+                <small>В выбранном листе</small>
+              </article>
+              <article class="summary-card summary-pass">
+                <span>Без сработок</span>
+                <strong id="count-pass">0</strong>
+                <small>Все включённые проверки пройдены</small>
+              </article>
+              <article class="summary-card summary-fail">
+                <span>Есть сработки</span>
+                <strong id="count-fail">0</strong>
+                <small>Требуют внимания</small>
+              </article>
+              <article class="summary-card summary-pending">
+                <span>Не оценено</span>
+                <strong id="count-unchecked">0</strong>
+                <small>Не задан справочник или лимит</small>
+              </article>
+            </div>
+
+            <div class="results-section">
+              <div class="subsection-heading">
+                <div>
+                  <h3>Сводка по правилам</h3>
+                  <p>Проверки по выбранным колонкам</p>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Правило</th>
+                      <th scope="col">Пройдено</th>
+                      <th scope="col">Сработки</th>
+                      <th scope="col">Не оценено</th>
+                    </tr>
+                  </thead>
+                  <tbody id="rules-body"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="results-section findings-section">
+              <div class="subsection-heading">
+                <div>
+                  <h3>Строки с результатами</h3>
+                  <p id="findings-caption">Без значений из исходного файла</p>
+                </div>
+                <span id="findings-count" class="small-count">0</span>
+              </div>
+              <div id="no-findings" class="success-note" hidden>
+                <span>✓</span> Сработок по включённым правилам нет.
+              </div>
+              <div class="table-wrap findings-table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Строка</th>
+                      <th scope="col">Статус</th>
+                      <th scope="col">Сработавшие проверки</th>
+                    </tr>
+                  </thead>
+                  <tbody id="findings-body"></tbody>
+                </table>
+              </div>
+              <p id="truncated-note" class="field-hint" hidden>
+                Показаны первые 1000 строк с результатами.
+              </p>
+            </div>
+
+            <p class="disclaimer">
+              Результаты отражают только выбранные технические проверки и
+              не являются решением о страховом покрытии.
+            </p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>DMS · Локальная среда</span>
+      <span>Файлы не передаются во внешние сервисы</span>
+    </footer>
+  </body>
+</html>
