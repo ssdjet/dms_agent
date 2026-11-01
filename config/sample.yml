@@ -1,0 +1,19 @@
+# Populate these fields only after confirming the source workbook structure and
+# approved reference data. This sample intentionally makes no coverage decisions.
+workbook:
+  sheet_name: null
+  header_row: 1
+  required_columns: []
+  skip_empty_rows: true
+
+mapping:
+  source_to_target: {}
+  required_targets: []
+
+rules:
+  service_code_field: null
+  service_codes: null
+  diagnosis_field: null
+  diagnosis_codes: null
+  amount_field: null
+  maximum_amount: null
