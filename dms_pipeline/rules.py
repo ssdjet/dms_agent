@@ -6,9 +6,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from .ingestion import CellValue
+
+if TYPE_CHECKING:
+    from .checks import ValidationCheck
 
 
 class RuleStatus(str, Enum):
@@ -195,10 +198,35 @@ class RuleEngine:
     """Apply configured rules in order and preserve deterministic result ordering."""
 
     rules: tuple[Rule, ...]
+    checks: tuple[ValidationCheck, ...] = ()
 
     def evaluate(self, record: Mapping[str, CellValue]) -> tuple[RuleResult, ...]:
-        """Evaluate all rules against one mapped record."""
-        return tuple(rule.evaluate(record) for rule in self.rules)
+        """Evaluate row-level rules; dataset checks require ``evaluate_records``."""
+        return (
+            *(rule.evaluate(record) for rule in self.rules),
+            *(check.evaluate_record(record) for check in self.checks),
+        )
+
+    def evaluate_records(
+        self,
+        records: tuple[Mapping[str, CellValue], ...],
+    ) -> tuple[tuple[RuleResult, ...], ...]:
+        """Evaluate all configured checks with full-workbook context available."""
+        base_results = [
+            tuple(rule.evaluate(record) for rule in self.rules)
+            for record in records
+        ]
+        check_results = [
+            check.evaluate_records(records)
+            for check in self.checks
+        ]
+        return tuple(
+            (
+                *base_results[index],
+                *(results[index] for results in check_results),
+            )
+            for index in range(len(records))
+        )
 
 
 @dataclass(frozen=True)
@@ -211,6 +239,7 @@ class RulesConfig:
     diagnosis_codes: tuple[str, ...] | None = None
     amount_field: str | None = None
     maximum_amount: Decimal | int | float | None = None
+    checks: tuple[ValidationCheck, ...] = ()
 
     def __post_init__(self) -> None:
         fields = (
@@ -250,6 +279,20 @@ class RulesConfig:
                 raise ValueError("maximum_amount must be finite") from exc
             if not maximum.is_finite():
                 raise ValueError("maximum_amount must be finite")
+        generated_ids = set()
+        if self.service_code_field:
+            generated_ids.update(
+                {"service_code_present", "service_code_reference"}
+            )
+        if self.diagnosis_field:
+            generated_ids.update({"diagnosis_present", "diagnosis_reference"})
+        if self.amount_field:
+            generated_ids.update({"amount_numeric", "amount_maximum"})
+        check_ids = tuple(check.rule_id for check in self.checks)
+        if len(set(check_ids)) != len(check_ids):
+            raise ValueError("configured check ids must be unique")
+        if generated_ids.intersection(check_ids):
+            raise ValueError("configured check ids conflict with built-in rule ids")
 
 
 def build_rules(config: RulesConfig) -> RuleEngine:
@@ -290,7 +333,7 @@ def build_rules(config: RulesConfig) -> RuleEngine:
                 config.maximum_amount,
             )
         )
-    return RuleEngine(tuple(rules))
+    return RuleEngine(tuple(rules), config.checks)
 
 
 def evaluate_rules(

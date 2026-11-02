@@ -7,6 +7,7 @@ from .audit import (
     create_audit_event,
     serialize_audit_event,
 )
+from .checks import CheckKind, ValidationCheck
 from .config import PipelineConfig, load_config
 from .ingestion import (
     CellValue,
@@ -35,6 +36,7 @@ __all__ = [
     "AuditFinding",
     "AuditStatus",
     "CellValue",
+    "CheckKind",
     "FieldMapping",
     "MaximumValueRule",
     "NumericValueRule",
@@ -44,6 +46,7 @@ __all__ = [
     "RuleResult",
     "RuleStatus",
     "RulesConfig",
+    "ValidationCheck",
     "WorkbookData",
     "WorkbookReadConfig",
     "WorkbookRow",

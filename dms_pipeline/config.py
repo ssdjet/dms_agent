@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from .checks import CheckKind, ValidationCheck
 from .errors import ConfigurationError, PipelineError
 from .ingestion import WorkbookReadConfig
 from .mapping import FieldMapping
@@ -104,6 +106,7 @@ def load_config(path: str | Path) -> PipelineConfig:
         "diagnosis_codes",
         "amount_field",
         "maximum_amount",
+        "checks",
     }
     _require_known_keys(rules_raw, allowed_rule_keys, "rules")
     try:
@@ -126,8 +129,9 @@ def load_config(path: str | Path) -> PipelineConfig:
             maximum_amount=_optional_decimal(
                 rules_raw.get("maximum_amount"), "rules.maximum_amount"
             ),
+            checks=_parse_checks(rules_raw.get("checks", ())),
         )
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise ConfigurationError(str(exc)) from exc
     return PipelineConfig(workbook, mapping, rules)
 
@@ -199,3 +203,225 @@ def _optional_decimal(value: Any, setting: str) -> Decimal | None:
     if not decimal_value.is_finite():
         raise ConfigurationError(f"{setting} must be a finite number")
     return decimal_value
+
+
+def _parse_checks(value: Any) -> tuple[ValidationCheck, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ConfigurationError("rules.checks must be a list")
+    checks: list[ValidationCheck] = []
+    known_keys = {
+        "id",
+        "kind",
+        "fields",
+        "values",
+        "pairs",
+        "catalog",
+        "periods",
+        "minimum",
+        "maximum",
+        "pattern",
+        "expected_type",
+        "date_format",
+        "group_by",
+        "period",
+        "strict",
+        "policy",
+    }
+    kind_options = {
+        CheckKind.REQUIRED: set(),
+        CheckKind.VALUE_TYPE: {"expected_type"},
+        CheckKind.PATTERN: {"pattern"},
+        CheckKind.NUMERIC_RANGE: {"minimum", "maximum"},
+        CheckKind.DATE_RANGE: {"minimum", "maximum", "date_format"},
+        CheckKind.DATE_ORDER: {"date_format", "strict"},
+        CheckKind.ALLOWED_VALUES: {"values"},
+        CheckKind.DENIED_VALUES: {"values"},
+        CheckKind.ALLOWED_PAIRS: {"pairs"},
+        CheckKind.PROGRAM_SERVICES: {"catalog"},
+        CheckKind.ACTIVE_PERIOD: {"periods", "date_format"},
+        CheckKind.PRICE_CATALOG: {"catalog"},
+        CheckKind.UNIQUE: set(),
+        CheckKind.REFERENCE_INTEGRITY: set(),
+        CheckKind.SEQUENCE: {"date_format", "strict"},
+        CheckKind.COUNT_LIMIT: {"group_by", "maximum"},
+        CheckKind.FREQUENCY_LIMIT: {
+            "date_format",
+            "group_by",
+            "maximum",
+            "period",
+        },
+        CheckKind.POLICY_DEPENDENT: {"policy"},
+    }
+    for index, raw_check in enumerate(value):
+        setting = f"rules.checks[{index}]"
+        if not isinstance(raw_check, dict):
+            raise ConfigurationError(f"{setting} must be a mapping")
+        _require_known_keys(raw_check, known_keys, setting)
+        rule_id = raw_check.get("id")
+        if not isinstance(rule_id, str) or not rule_id.strip():
+            raise ConfigurationError(f"{setting}.id must be non-empty text")
+        try:
+            kind = CheckKind(raw_check.get("kind"))
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(f"{setting}.kind is not supported") from exc
+        unused_keys = set(raw_check).difference({"id", "kind", "fields"}).difference(
+            kind_options[kind]
+        )
+        if unused_keys:
+            raise ConfigurationError(
+                f"unsupported {kind.value} setting(s): {', '.join(sorted(unused_keys))}"
+            )
+
+        fields = _string_tuple(raw_check.get("fields", ()), f"{setting}.fields")
+        group_by = _string_tuple(raw_check.get("group_by", ()), f"{setting}.group_by")
+        values = _optional_string_tuple(
+            raw_check.get("values"), f"{setting}.values"
+        )
+        pairs = _parse_pairs(raw_check.get("pairs", ()), f"{setting}.pairs")
+        catalog = _parse_catalog(
+            raw_check.get("catalog"),
+            f"{setting}.catalog",
+            kind,
+        )
+        periods = _parse_periods(raw_check.get("periods"), f"{setting}.periods")
+
+        if kind in {CheckKind.NUMERIC_RANGE, CheckKind.COUNT_LIMIT, CheckKind.FREQUENCY_LIMIT}:
+            minimum = _optional_decimal(
+                raw_check.get("minimum"), f"{setting}.minimum"
+            )
+            maximum = _optional_decimal(
+                raw_check.get("maximum"), f"{setting}.maximum"
+            )
+        elif kind is CheckKind.DATE_RANGE:
+            minimum = _optional_date(raw_check.get("minimum"), f"{setting}.minimum")
+            maximum = _optional_date(raw_check.get("maximum"), f"{setting}.maximum")
+        else:
+            minimum = None
+            maximum = None
+        if kind in {CheckKind.COUNT_LIMIT, CheckKind.FREQUENCY_LIMIT}:
+            if maximum is not None and maximum != maximum.to_integral_value():
+                raise ConfigurationError(f"{setting}.maximum must be an integer")
+            if maximum is not None and maximum < 0:
+                raise ConfigurationError(f"{setting}.maximum cannot be negative")
+
+        pattern = _optional_string(raw_check.get("pattern"), f"{setting}.pattern")
+        expected_type = _optional_string(
+            raw_check.get("expected_type"), f"{setting}.expected_type"
+        )
+        date_format = _optional_string(
+            raw_check.get("date_format"), f"{setting}.date_format"
+        )
+        period = _optional_string(raw_check.get("period"), f"{setting}.period")
+        policy = _optional_string(raw_check.get("policy"), f"{setting}.policy")
+        strict = _boolean(raw_check.get("strict", False), f"{setting}.strict")
+
+        try:
+            checks.append(
+                ValidationCheck(
+                    rule_id=rule_id,
+                    kind=kind,
+                    fields=fields,
+                    reference_values=values,
+                    allowed_pairs=pairs,
+                    catalog=catalog,
+                    periods=periods,
+                    minimum=minimum,
+                    maximum=maximum,
+                    pattern=pattern,
+                    expected_type=expected_type,
+                    date_format=date_format,
+                    group_by=group_by,
+                    period=period,
+                    strict=strict,
+                    policy=policy,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(f"{setting}: {exc}") from exc
+    return tuple(checks)
+
+
+def _parse_pairs(
+    value: Any,
+    setting: str,
+) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ConfigurationError(f"{setting} must be a list of two-item text lists")
+    pairs: list[tuple[str, str]] = []
+    for pair in value:
+        if (
+            not isinstance(pair, (list, tuple))
+            or len(pair) != 2
+            or any(not isinstance(item, str) for item in pair)
+        ):
+            raise ConfigurationError(f"{setting} must contain two-item text lists")
+        pairs.append((pair[0], pair[1]))
+    return tuple(pairs)
+
+
+def _parse_catalog(
+    value: Any,
+    setting: str,
+    kind: CheckKind,
+) -> tuple[tuple[str, tuple[str, ...] | Decimal], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str) or not key.strip() for key in value
+    ):
+        raise ConfigurationError(f"{setting} must be a mapping with text keys")
+    entries: list[tuple[str, tuple[str, ...] | Decimal]] = []
+    for key, entry in value.items():
+        if kind is CheckKind.PROGRAM_SERVICES:
+            entries.append((key, _string_tuple(entry, f"{setting}.{key}")))
+        elif kind is CheckKind.PRICE_CATALOG:
+            price = _optional_decimal(entry, f"{setting}.{key}")
+            if price is None:
+                raise ConfigurationError(f"{setting}.{key} must be numeric")
+            entries.append((key, price))
+        else:
+            raise ConfigurationError(
+                f"{setting} is only supported for program_services or price_catalog"
+            )
+    return tuple(entries)
+
+
+def _parse_periods(
+    value: Any,
+    setting: str,
+) -> tuple[tuple[str, date | None, date | None], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str) or not key.strip() for key in value
+    ):
+        raise ConfigurationError(f"{setting} must be a mapping with text keys")
+    periods: list[tuple[str, date | None, date | None]] = []
+    for key, interval in value.items():
+        if not isinstance(interval, (list, tuple)) or len(interval) != 2:
+            raise ConfigurationError(
+                f"{setting}.{key} must contain [start_date, end_date]"
+            )
+        periods.append(
+            (
+                key,
+                _optional_date(interval[0], f"{setting}.{key}[0]"),
+                _optional_date(interval[1], f"{setting}.{key}[1]"),
+            )
+        )
+    return tuple(periods)
+
+
+def _optional_date(value: Any, setting: str) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError as exc:
+            raise ConfigurationError(f"{setting} must be an ISO date or null") from exc
+    raise ConfigurationError(f"{setting} must be an ISO date or null")
