@@ -22,6 +22,7 @@ rules:
   diagnosis_codes: null
   amount_field: null
   maximum_amount: null
+  checks: []
 ```
 
 Пример ниже — только синтетический формат конфигурации. Имена колонок,
@@ -65,6 +66,7 @@ rules:
 
 ```python
 from dms_pipeline.config import load_config
+from dms_pipeline.audit import create_audit_event
 from dms_pipeline.ingestion import read_workbook
 from dms_pipeline.mapping import map_row
 from dms_pipeline.rules import build_rules
@@ -72,10 +74,17 @@ from dms_pipeline.rules import build_rules
 config = load_config("config/example.yml")
 workbook = read_workbook("synthetic.xlsx", config.workbook)
 engine = build_rules(config.rules)
-
-for source_row in workbook.rows:
-    mapped = map_row(source_row.values, config.mapping)
-    results = engine.evaluate(mapped)
+mapped_records = tuple(
+    map_row(source_row.values, config.mapping)
+    for source_row in workbook.rows
+)
+results_by_row = engine.evaluate_records(mapped_records)
+for source_row, results in zip(workbook.rows, results_by_row):
+    event = create_audit_event(
+        workbook.sha256,
+        source_row.row_number,
+        results,
+    )
 ```
 
 Этот фрагмент показывает соединение модулей, но не добавляет файлового журнала
@@ -115,6 +124,7 @@ for source_row in workbook.rows:
 | `diagnosis_codes` | Включает точное сравнение диагноза с заданным непустым справочником. |
 | `amount_field` | Создаёт проверку числового типа суммы. |
 | `maximum_amount` | Включает проверку верхнего лимита, когда поле суммы и лимит заданы. |
+| `checks` | Список расширенных явных правил для отдельных записей или всего набора. |
 
 Результат по каждому правилу:
 
@@ -140,6 +150,100 @@ for source_row in workbook.rows:
 3. иначе `pass`.
 
 Таким образом, `not_evaluated` не считается ни `pass`, ни отказом в покрытии.
+
+### Расширенные `rules.checks`
+
+Каждое правило — YAML mapping с обязательными `id`, `kind` и, в зависимости от
+вида, `fields`. `id` должен состоять из строчных латинских букв, цифр и `_`.
+Идентификаторы уникальны и не должны повторять идентификаторы встроенных правил.
+Неизвестные ключи и неподдерживаемые виды отклоняются при загрузке конфигурации.
+
+| `kind` | Параметры | Семантика |
+|---|---|---|
+| `required` | `fields: [field]` | Значение не пустое. |
+| `value_type` | `fields`, `expected_type: text/numeric/date` | Проверяет тип; `bool` не считается числом. |
+| `pattern` | `fields`, `pattern` | Регулярное выражение применяется целиком (`fullmatch`). |
+| `numeric_range` | `fields`, `minimum`, `maximum` | Включительные границы; задайте хотя бы одну. |
+| `date_range` | `fields`, ISO `minimum`/`maximum`, необязательный `date_format` | Включительный диапазон. Без формата текстовые даты должны быть ISO. |
+| `date_order` | `fields: [start, end]`, необязательный `strict` | Проверяет `start <= end`, либо `<`, если `strict: true`. |
+| `allowed_values` / `denied_values` | `fields`, необязательный `values` | Сравнение точное и чувствительное к регистру; отсутствие/пустота списка — `not_evaluated`. |
+| `allowed_pairs` | `fields: [left, right]`, `pairs: [[a, b], ...]` | Явный справочник допустимых сочетаний, например услуги и диагноза. |
+| `program_services` | `fields: [program, service]`, `catalog` | Для программы задаёт явный список разрешённых услуг. |
+| `active_period` | `fields: [key, date]`, `periods` | Сверяет дату со включительным периодом для ключа программы/договора. |
+| `price_catalog` | `fields: [service, amount]`, `catalog` | Точное числовое сравнение с заданной ценой; тарифы не угадываются. |
+| `unique` | `fields: [field, ...]` | Уникальность комбинации по всей книге; все одинаковые записи помечаются `fail`. Отсутствие значения отдельно проверяется `required`. |
+| `reference_integrity` | `fields: [foreign, local]` | Первое поле каждой строки должно присутствовать среди значений второго поля в той же книге. |
+| `sequence` | `fields: [group_field, ..., date]`, необязательный `strict` | Проверяет возрастание дат в исходном порядке строк внутри группы. |
+| `count_limit` | `group_by`, `maximum` | Явно ограничивает число строк на группу; пустой `group_by` означает весь набор. |
+| `frequency_limit` | `fields: [value, date]`, `group_by`, `period`, `maximum` | Явно ограничивает частоту значения по группе и дню/месяцу/году. Это порог, не статистический baseline. |
+| `policy_dependent` | `policy` | Всегда `not_evaluated` с безопасным пояснением из фиксированного списка. |
+
+Пример только синтетических значений:
+
+```yaml
+rules:
+  checks:
+    - id: service_code_reference
+      kind: allowed_values
+      fields: [service_code]
+      values: [SYN-SVC-01, SYN-SVC-02]
+    - id: service_diagnosis_pair
+      kind: allowed_pairs
+      fields: [service_code, diagnosis]
+      pairs:
+        - [SYN-SVC-01, SYN-DX-01]
+    - id: service_program_membership
+      kind: program_services
+      fields: [program, service_code]
+      catalog:
+        SYN-PLAN: [SYN-SVC-01]
+    - id: contract_active
+      kind: active_period
+      fields: [contract_id, service_date]
+      periods:
+        SYN-CONTRACT: [2025-01-01, 2025-12-31]
+    - id: services_per_visit
+      kind: count_limit
+      group_by: [visit_id]
+      maximum: 5
+    - id: medical_indications
+      kind: policy_dependent
+      policy: medical_indications
+```
+
+Поддерживаемые ключи `policy`: `program_membership`, `medical_indications`,
+`medical_necessity`, `quantity_norms`, `price_catalog`, `contract_period`,
+`repeat_visit`, `anesthesia`, `coverage_exclusions`, `additional_services`,
+`denial_justification`, `statistical_baseline`. Эти декларации нужны, чтобы
+результат явно фиксировал отсутствие правил, а не означал прохождение проверки.
+Нельзя менять фиксированные пояснения на сообщения с данными записей.
+
+#### Как правила покрывают десять групп событий
+
+| Группа событий | Реализуемое правило при явной конфигурации | Что остаётся `not_evaluated` без источника |
+|---|---|---|
+| Программа страхования | `program_services`, `active_period` | Условия участия и периоды, не внесённые в catalog. |
+| Медицинские данные | `required`, `allowed_values`, `allowed_pairs` | Клинические показания и медицинская необходимость. |
+| Финансы | `numeric_range`, `count_limit`, `price_catalog` | Нормативы количества и тарифы, пока их не предоставили. |
+| Время | `date_range`, `date_order`, `sequence`, `active_period` | Срок договора/программы без явных дат. |
+| Целостность данных | `required`, `unique`, `reference_integrity`, `pattern` | Нельзя определить обязательность неизвестного поля автоматически. |
+| Особые условия | `count_limit`, `frequency_limit` | Обоснованность повторного приёма и анестезии. |
+| Исключения и ограничения | `denied_values`, `allowed_values` | Неуказанные исключения и критерии отказа. |
+| Статистика | `frequency_limit`, `numeric_range` с заданными порогами | Автоматическое обучение baseline и аномалии без согласованного порога. |
+| Форматы | `value_type`, `pattern`, числовые/датовые проверки | Справочник кодов без заданных значений. |
+| Системные параметры | `unique`, `reference_integrity`, `pattern` | Смысл идентификаторов без правил источника. |
+
+Сетевые справочники, автоматически выводимые пороги и клинические эвристики
+не используются. Пакетные проверки требуют `RuleEngine.evaluate_records()`;
+`evaluate(record)` для такой проверки возвращает `not_evaluated`, так как одной
+строки недостаточно. Веб-форма пока поддерживает только встроенные проверки
+кода услуги, диагноза и суммы; расширенные `checks` предназначены для YAML/API
+интеграции через Python-пакет.
+
+Пустые справочники/периоды не интерпретируются как запрет всего: проверка
+возвращает `not_evaluated`. Отсутствующий ключ в непустом настроенном каталоге
+считается `fail`. Отсутствие значения поля для проверки уникальности следует
+проверять отдельным правилом `required`.
 
 ## Связь конфига и интерфейса
 

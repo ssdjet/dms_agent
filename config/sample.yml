@@ -17,3 +17,5 @@ rules:
   diagnosis_codes: null
   amount_field: null
   maximum_amount: null
+  # Add rule specifications only from an approved source. See docs/configuration.md.
+  checks: []
